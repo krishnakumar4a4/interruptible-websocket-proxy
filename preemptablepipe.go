@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-type PreEmptablePipe struct {
+type PersistentPipe struct {
 	// ID Unique identifier for this pipe
 	ID uuid.UUID
 	// ClientUUID Unique identifier for the client
@@ -26,10 +26,10 @@ type PreEmptablePipe struct {
 	bufferByteLimit int
 }
 
-// NewPreEmptablePipe Creates a new preempt-able websocket pipe
-func NewPreEmptablePipe(clientID uuid.UUID, clientConn, backendConn io.ReadWriteCloser) *PreEmptablePipe {
+// NewPersistentPipe Creates a new preempt-able websocket pipe
+func NewPersistentPipe(clientID uuid.UUID, clientConn, backendConn io.ReadWriteCloser) *PersistentPipe {
 	limit := 5 * 1024 * 1024
-	return &PreEmptablePipe{
+	return &PersistentPipe{
 		ID:              uuid.New(),
 		ClientID:        clientID,
 		ClientConn:      clientConn,
@@ -41,7 +41,7 @@ func NewPreEmptablePipe(clientID uuid.UUID, clientConn, backendConn io.ReadWrite
 
 // Stream runs back and forth stream copy between clientConn and backendConn
 // Also helps to restart stream when pre-empted
-func (pep *PreEmptablePipe) Stream() error {
+func (pep *PersistentPipe) Stream() error {
 	pep.streamMut.Lock()
 	defer pep.streamMut.Unlock()
 	if pep.streamOn {
@@ -58,7 +58,7 @@ func (pep *PreEmptablePipe) Stream() error {
 	return nil
 }
 
-func (pep *PreEmptablePipe) listenForErrors(errChan chan error) {
+func (pep *PersistentPipe) listenForErrors(errChan chan error) {
 	for {
 		err := <-errChan
 		log.Printf("error reported to listener: %s", err)

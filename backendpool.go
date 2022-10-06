@@ -2,6 +2,7 @@ package interruptible_websocket_proxy
 
 import (
 	"container/list"
+	"fmt"
 	"golang.org/x/net/websocket"
 	"log"
 	"math"
@@ -22,19 +23,22 @@ type BackendConn struct {
 	ErrorInfo
 }
 
+// TODO: Can modify implementation to use channels
+
 // BackendWSConnPool This should give a new connection for client connection request
 // Should keep track of available backends at any point of time
 // In a way it feels like it is doing the job of load balancer,
 // but this additionally has to ensure there is at most one client connection per backend/pod
-// TODO: When to remove an url and associated conn from Pool?
 type BackendWSConnPool struct {
 	// When new backend is available, it's url is added to the list here
 	availableBackendUrls *list.List
+
+	// Required to de-duplicate backendUrls
+	registeredBackendUrls sync.Map
+
 	// When a new backend connection is created, a reference is maintained here
-	// TODO: Sync map here to prevent races
-	inUseMap map[string]*BackendConn
+	inUseMap sync.Map
 	// When a client closes its connection with/without an error
-	// TODO: Sync map here to prevent races
 	idleConnections      *list.List
 	idleConnCount        *int64
 	idleConnMutex        sync.Mutex
@@ -43,19 +47,20 @@ type BackendWSConnPool struct {
 	maxAllowedErrorCount int64
 }
 
-func NewBackendConnPool() *BackendWSConnPool {
+func NewBackendConnPool(maxIdleConnCount, maxAllowedErrorCountPerConn int64) *BackendWSConnPool {
 	urlList := list.New()
 	erroredUrlList := list.New()
 	idleConnList := list.New()
 	var idleConnCount int64 = 0
 	pool := &BackendWSConnPool{
-		availableBackendUrls: urlList,
-		inUseMap:             make(map[string]*BackendConn),
-		idleConnections:      idleConnList,
-		erroredConnections:   erroredUrlList,
-		idleConnCount:        &idleConnCount,
-		maxIdleConnections:   5,
-		maxAllowedErrorCount: 100,
+		availableBackendUrls:  urlList,
+		registeredBackendUrls: sync.Map{},
+		inUseMap:              sync.Map{},
+		idleConnections:       idleConnList,
+		erroredConnections:    erroredUrlList,
+		idleConnCount:         &idleConnCount,
+		maxIdleConnections:    maxIdleConnCount,
+		maxAllowedErrorCount:  maxAllowedErrorCountPerConn,
 	}
 	pool.startIdleConnectionFiller()
 	pool.erroredConnectionRefresher()
@@ -84,6 +89,7 @@ func (bp *BackendWSConnPool) GetConn() (*BackendConn, error) {
 		}
 		log.Printf("INFO: obtained new connection from idle connections")
 		atomic.AddInt64(bp.idleConnCount, -1)
+		bp.inUseMap.Store(conn.connUrl, conn)
 		return conn, nil
 	}
 }
@@ -97,14 +103,18 @@ func backOffWait(i *int, maxBackOffExponent int) {
 	*i += 1
 }
 
-func (bp *BackendWSConnPool) AddToPool(url string) {
+func (bp *BackendWSConnPool) AddToPool(url string) error {
 	log.Printf("INFO: adding connection to backend pool: %s", url)
-	//TODO: Deduplicate urls using hashmap?
+	if _, ok := bp.registeredBackendUrls.Load(url); ok {
+		return fmt.Errorf("backend url: %s already registered, retry later", url)
+	}
 	bp.availableBackendUrls.PushBack(url)
+	bp.registeredBackendUrls.Store(url, true)
+	return nil
 }
 
 func (bp *BackendWSConnPool) MarkError(conn *BackendConn) {
-	delete(bp.inUseMap, conn.connUrl)
+	bp.inUseMap.Delete(conn.connUrl)
 	now := time.Now()
 	conn.lastCheckedTime = &now
 	conn.errorCount += 1

@@ -1,4 +1,5 @@
-# Interrupt-able WebSocket Proxy
+# Interruptible WebSocket Proxy 
+### (a.k.a UnInterrupted WebSocket Proxy)
 
 Websocket connections are meant to be persistent for longer durations.If a backend is supporting multiple client websocket connections, it makes backend to less dynamic in terms of scaling, load balancing, deployments, quick restarts, minor network interruptions etc.
 
@@ -9,3 +10,7 @@ This library creates a persistent connection object called `PreEmptiblePipe` for
 When the backend connection is down, next available backend connection is chosen from the pool. Once a new backend connection is restored, all the data received in the meantime will be flushed to the backend connection first before connecting client stream.   
 The data received from client is temporarily stored in a byte array in memory. There is a max limit for each byte array, if reached before finding a backed connection from pool, the client connection is dropped as well to prevent memory hog. 
 `PipeManager` also can register/de-register a backend connection to availability pool.
+
+## How to Use
+1. Use it as an out of the box websocket proxy
+2. Wire up the `PipeManager` to a regular websocket server thus making it a proxy

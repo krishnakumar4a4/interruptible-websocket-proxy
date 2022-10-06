@@ -27,7 +27,7 @@ const (
 // copyBuffer is the actual implementation of Copy and CopyBuffer.
 // if buf is nil, one is allocated.
 // TODO: Should mutex writes to backend error
-func (pep *PreEmptablePipe) copyBuffer(cd CopyDirection, errChan chan error) {
+func (pep *PersistentPipe) copyBuffer(cd CopyDirection, errChan chan error) {
 	var src func() io.Reader
 	var dst func() io.Writer
 	var written int64
