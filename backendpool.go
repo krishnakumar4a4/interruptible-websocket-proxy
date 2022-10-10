@@ -4,9 +4,9 @@ import (
 	"container/list"
 	"fmt"
 	"golang.org/x/net/websocket"
-	"log"
 	"math"
 	"net"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,9 +45,10 @@ type BackendWSConnPool struct {
 	erroredConnections   *list.List
 	maxIdleConnections   int64
 	maxAllowedErrorCount int64
+	logger               logger
 }
 
-func NewBackendConnPool(maxIdleConnCount, maxAllowedErrorCountPerConn int64) *BackendWSConnPool {
+func NewBackendConnPool(maxIdleConnCount, maxAllowedErrorCountPerConn int64, logger logger) *BackendWSConnPool {
 	urlList := list.New()
 	erroredUrlList := list.New()
 	idleConnList := list.New()
@@ -61,6 +62,7 @@ func NewBackendConnPool(maxIdleConnCount, maxAllowedErrorCountPerConn int64) *Ba
 		idleConnCount:         &idleConnCount,
 		maxIdleConnections:    maxIdleConnCount,
 		maxAllowedErrorCount:  maxAllowedErrorCountPerConn,
+		logger:                logger,
 	}
 	pool.startIdleConnectionFiller()
 	pool.erroredConnectionRefresher()
@@ -69,12 +71,12 @@ func NewBackendConnPool(maxIdleConnCount, maxAllowedErrorCountPerConn int64) *Ba
 
 // GetConn as soon as this is called, the connection will be immediately marked for use,
 // defer calling this till the moment you need it
-func (bp *BackendWSConnPool) GetConn() (*BackendConn, error) {
+func (bp *BackendWSConnPool) GetConn() *BackendConn {
 	i := 0
 	for {
 		conn := bp.tryAndFetchConnectionFromIdleList()
 		if conn == nil {
-			log.Printf("WARN: no idle connection is available, waiting for one to be available")
+			bp.logger.Debug("no idle connection is available, waiting for one to be available")
 			backOffWait(&i, 5)
 			continue
 		}
@@ -82,15 +84,14 @@ func (bp *BackendWSConnPool) GetConn() (*BackendConn, error) {
 			netConn, err := newConn(conn.connUrl)
 			if err != nil {
 				bp.MarkError(conn)
-				log.Printf("ERROR: obtained new connection but errored out while dialing: %s", err.Error())
+				bp.logger.Error("obtained new connection but errored out while dialing", err)
 				continue
 			}
 			conn.Conn = netConn
 		}
-		log.Printf("INFO: obtained new connection from idle connections")
 		atomic.AddInt64(bp.idleConnCount, -1)
 		bp.inUseMap.Store(conn.connUrl, conn)
-		return conn, nil
+		return conn
 	}
 }
 
@@ -104,12 +105,12 @@ func backOffWait(i *int, maxBackOffExponent int) {
 }
 
 func (bp *BackendWSConnPool) AddToPool(url string) error {
-	log.Printf("INFO: adding connection to backend pool: %s", url)
 	if _, ok := bp.registeredBackendUrls.Load(url); ok {
 		return fmt.Errorf("backend url: %s already registered, retry later", url)
 	}
 	bp.availableBackendUrls.PushBack(url)
 	bp.registeredBackendUrls.Store(url, true)
+	bp.logger.Debug(fmt.Sprintf("added new connection to backend pool: %s", url))
 	return nil
 }
 
@@ -118,7 +119,6 @@ func (bp *BackendWSConnPool) MarkError(conn *BackendConn) {
 	now := time.Now()
 	conn.lastCheckedTime = &now
 	conn.errorCount += 1
-	log.Printf("ERROR: connection marked as error: %s", conn.connUrl)
 	bp.erroredConnections.PushBack(conn)
 }
 
@@ -137,7 +137,6 @@ func (bp *BackendWSConnPool) startIdleConnectionFiller() {
 	go func() {
 		for {
 			if atomic.LoadInt64(bp.idleConnCount) > bp.maxIdleConnections {
-				log.Printf("INFO: minimum idle connections exist, skip adding new one")
 				time.Sleep(time.Second * 2)
 				continue
 			}
@@ -148,7 +147,6 @@ func (bp *BackendWSConnPool) startIdleConnectionFiller() {
 				continue
 			}
 
-			log.Printf("INFO: adding available url into idle connection list: %s", front.Value.(string))
 			bp.availableBackendUrls.Remove(front)
 			atomic.AddInt64(bp.idleConnCount, 1)
 			bp.idleConnections.PushBack(&BackendConn{
@@ -156,6 +154,7 @@ func (bp *BackendWSConnPool) startIdleConnectionFiller() {
 				connUrl:   front.Value.(string),
 				ErrorInfo: ErrorInfo{},
 			})
+			bp.logger.Debug(fmt.Sprintf("added new available url into idle connection list: %s", front.Value.(string)))
 		}
 	}()
 }
@@ -173,17 +172,20 @@ func (bp *BackendWSConnPool) erroredConnectionRefresher() {
 			if backendConn.errorCount < bp.maxAllowedErrorCount {
 				backendConn.Conn = nil
 				bp.idleConnections.PushBack(backendConn)
-				log.Printf("INFO: errored connection is added back to idle connection list as it did not reach max error count, current count: %d", backendConn.errorCount)
+				bp.logger.Debug(fmt.Sprintf("errored connection added back to idle connection list, current error count: %d", backendConn.errorCount))
 			} else {
-				log.Printf("WARN: de-registering the url as it has reached max error count: %s", backendConn.connUrl)
+				bp.logger.Warn(fmt.Sprintf("de-registering the url as it has reached max error count: %s", backendConn.connUrl), nil)
 			}
 		}
 	}()
 }
 
-func newConn(url string) (net.Conn, error) {
-	// TODO: remove hard coded origin here
-	conn, err := websocket.Dial(url, "", "http://localhost")
+func newConn(wsUrl string) (net.Conn, error) {
+	parsedWSUrl, err := url.Parse(wsUrl)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := websocket.Dial(wsUrl, "", parsedWSUrl.Host)
 	if err != nil {
 		return nil, err
 	}

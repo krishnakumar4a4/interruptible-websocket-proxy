@@ -4,17 +4,21 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"io"
-	"log"
 	"sync"
-	"time"
 )
 
 type PipeErrorListener func(pipeId uuid.UUID, err error)
 
 type ConnectionProviderPool interface {
 	AddToPool(url string) error
-	GetConn() (*BackendConn, error)
+	GetConn() *BackendConn
 	MarkError(conn *BackendConn)
+}
+
+type logger interface {
+	Warn(msg string, nestedErr error)
+	Error(msg string, nestedErr error)
+	Debug(msg string)
 }
 
 type WebsocketPipeManager struct {
@@ -23,22 +27,29 @@ type WebsocketPipeManager struct {
 
 	backendPool ConnectionProviderPool
 	backOffFunc func(counter *int64)
+
+	interruptMemoryLimitPerConnInBytes int
+	logger                             logger
 }
 
 // NewWebsocketPipeManager Creates a websocket pipe manager with provided connection pool
-func NewWebsocketPipeManager(pool ConnectionProviderPool) *WebsocketPipeManager {
+func NewWebsocketPipeManager(pool ConnectionProviderPool, interruptMemoryLimitPerConnInBytes int, logger logger) *WebsocketPipeManager {
 	return &WebsocketPipeManager{
-		clientPipesMap: sync.Map{},
-		backendPool:    pool,
+		clientPipesMap:                     sync.Map{},
+		backendPool:                        pool,
+		interruptMemoryLimitPerConnInBytes: interruptMemoryLimitPerConnInBytes,
+		logger:                             logger,
 	}
 }
 
 // NewDefaultWebsocketPipeManager Creates a default pipe manager with given pool configuration as arguments
-func NewDefaultWebsocketPipeManager(maxIdleConnCount, maxAllowedErrorCount int64) *WebsocketPipeManager {
-	pool := NewBackendConnPool(maxIdleConnCount, maxAllowedErrorCount)
+func NewDefaultWebsocketPipeManager(maxIdleConnCount, maxAllowedErrorCount int64, interruptMemoryLimitPerConnInBytes int, logger logger) *WebsocketPipeManager {
+	pool := NewBackendConnPool(maxIdleConnCount, maxAllowedErrorCount, logger)
 	return &WebsocketPipeManager{
-		clientPipesMap: sync.Map{},
-		backendPool:    pool,
+		clientPipesMap:                     sync.Map{},
+		backendPool:                        pool,
+		interruptMemoryLimitPerConnInBytes: interruptMemoryLimitPerConnInBytes,
+		logger:                             logger,
 	}
 }
 
@@ -63,31 +74,19 @@ func (pm *WebsocketPipeManager) CreatePipe(clientId uuid.UUID, conn io.ReadWrite
 	}
 	errChan := make(chan error)
 	// Create and get backendConn
-	backendConn, err := pm.backendPool.GetConn()
-	if err != nil {
-		return err
-	}
+	backendConn := pm.backendPool.GetConn()
 
-	persistentPipe := NewPersistentPipe(clientId, conn, backendConn)
+	persistentPipe := NewPersistentPipe(clientId, conn, backendConn, pm.interruptMemoryLimitPerConnInBytes)
 	persistentPipe.ErrorListener = func(pipeId uuid.UUID, err error) {
-		log.Printf("error during stream: %s", err.Error())
 		for {
 			if persistentPipe.BackendErr != nil {
-				log.Printf("recognised backedend error: %s, attempting another connection", persistentPipe.BackendErr)
-				pm.backendPool.MarkError(persistentPipe.BackendConn.(*BackendConn))
-				backendConn, err := pm.backendPool.GetConn()
-				if err != nil {
-					log.Printf("error unable to get connection from backendPool: %s", err.Error())
-					if pm.backOffFunc != nil {
-						pm.backOffFunc(nil)
-					} else {
-						time.Sleep(time.Second)
-					}
-					continue
-				}
-				log.Printf("substituted new backend for pipe related to client id: %s", clientId)
+				bc := persistentPipe.BackendConn.(*BackendConn)
+				pm.logger.Warn(fmt.Sprintf("stream for client Id %s interrupted with backend conn %s, attempting another connection", clientId, bc.connUrl), persistentPipe.BackendErr)
+				pm.backendPool.MarkError(bc)
+				backendConn := pm.backendPool.GetConn()
 				persistentPipe.BackendConn = backendConn
 				persistentPipe.BackendErr = nil
+				pm.logger.Debug(fmt.Sprintf("substituted new backend for pipe associated with client id: %s", clientId))
 				break
 			} else if persistentPipe.ClientErr != nil {
 				// TODO: Can have intelligent way of waiting for client to comeback
@@ -101,6 +100,5 @@ func (pm *WebsocketPipeManager) CreatePipe(clientId uuid.UUID, conn io.ReadWrite
 	if pipeErr != nil {
 		errChan <- pipeErr
 	}
-	log.Println("returning from create pipe")
 	return <-errChan
 }

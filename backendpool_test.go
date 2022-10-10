@@ -10,9 +10,19 @@ import (
 	"time"
 )
 
+type testLogger struct{}
+
+func (testLogger) Warn(msg string, nestedErr error) {}
+
+func (testLogger) Error(msg string, nestedErr error) {}
+
+func (testLogger) Debug(msg string) {}
+
 func TestNewBackendConnPool(t *testing.T) {
+	tl := &testLogger{}
+
 	t.Run("ShouldBeAbleToABackendUrlExactlyOnceToThePool", func(t *testing.T) {
-		pool := NewBackendConnPool(5, 100)
+		pool := NewBackendConnPool(5, 100, tl)
 		err := pool.AddToPool("ws://localhost:8081")
 		assert.Nil(t, err)
 		err = pool.AddToPool("ws://localhost:8081")
@@ -30,7 +40,7 @@ func TestNewBackendConnPool(t *testing.T) {
 			err := http.ListenAndServe(":8081", server)
 			assert.Nil(t, err)
 		}()
-		pool := NewBackendConnPool(5, 1)
+		pool := NewBackendConnPool(5, 1, tl)
 		expUrl := "ws://localhost:8081"
 
 		err := pool.AddToPool(expUrl)
@@ -39,7 +49,7 @@ func TestNewBackendConnPool(t *testing.T) {
 		_, ok := pool.inUseMap.Load(expUrl)
 		assert.False(t, ok)
 
-		conn, err := pool.GetConn()
+		conn := pool.GetConn()
 		assert.Nil(t, err)
 		assert.Equal(t, expUrl, conn.connUrl)
 
@@ -58,12 +68,11 @@ func TestNewBackendConnPool(t *testing.T) {
 			err := http.ListenAndServe(":8082", server)
 			assert.Nil(t, err)
 		}()
-		pool := NewBackendConnPool(5, 1)
+		pool := NewBackendConnPool(5, 1, tl)
 		expUrl := "ws://localhost:8082"
 		err := pool.AddToPool(expUrl)
 		assert.Nil(t, err)
-		conn, err := pool.GetConn()
-		assert.Nil(t, err)
+		conn := pool.GetConn()
 		pool.MarkError(conn)
 		assert.Equal(t, int64(1), conn.errorCount)
 	})
@@ -79,16 +88,14 @@ func TestNewBackendConnPool(t *testing.T) {
 			err := http.ListenAndServe(":8083", server)
 			assert.Nil(t, err)
 		}()
-		pool := NewBackendConnPool(5, 2)
+		pool := NewBackendConnPool(5, 2, tl)
 		expUrl := "ws://localhost:8083"
 		err := pool.AddToPool(expUrl)
 		assert.Nil(t, err)
-		conn, err := pool.GetConn()
-		assert.Nil(t, err)
+		conn := pool.GetConn()
 		pool.MarkError(conn)
 
-		conn, err = pool.GetConn()
-		assert.Nil(t, err)
+		conn = pool.GetConn()
 		pool.MarkError(conn)
 
 		assert.Eventually(t, func() bool {

@@ -1,4 +1,4 @@
-module interruptible-websocket-proxy
+module github.com/krishnakumar4a4/interruptible-websocket-proxy
 
 go 1.18
 

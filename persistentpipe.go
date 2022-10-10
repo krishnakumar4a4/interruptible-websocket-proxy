@@ -27,15 +27,14 @@ type PersistentPipe struct {
 }
 
 // NewPersistentPipe Creates a new preempt-able websocket pipe
-func NewPersistentPipe(clientID uuid.UUID, clientConn, backendConn io.ReadWriteCloser) *PersistentPipe {
-	limit := 5 * 1024 * 1024
+func NewPersistentPipe(clientID uuid.UUID, clientConn, backendConn io.ReadWriteCloser, interruptMemoryLimitPerConnInBytes int) *PersistentPipe {
 	return &PersistentPipe{
 		ID:              uuid.New(),
 		ClientID:        clientID,
 		ClientConn:      clientConn,
 		BackendConn:     backendConn,
-		bufferByteLimit: limit,
-		backendBuffer:   make([]byte, 0, limit),
+		bufferByteLimit: interruptMemoryLimitPerConnInBytes,
+		backendBuffer:   make([]byte, 0, interruptMemoryLimitPerConnInBytes),
 	}
 }
 
